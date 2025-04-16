@@ -1,5 +1,6 @@
 #include "BoardDensitySystem.h"
 #include <chrono>
+#include <iostream>
 
 BoardDensitySystem::BoardDensitySystem(const std::chrono::high_resolution_clock::time_point& startTime) 
     : startTime(startTime)
@@ -22,20 +23,29 @@ void BoardDensitySystem::CalculateDensityValues(int min_pos_mm, int max_pos_mm,
     
     int min_pos_time_uS;
     int max_pos_time_uS;
-    int sum_density;
-    int min_density_val;
-    bool first = true;
+    int sum_density = 0;
     int count = 0;
 
-    // first, find the time ranges that correspond to the given board positions.
+    *mean_density = 0;
+    *min_density = INT_MAX;
+    *median_density = 0;
+
+    // verify the requested board position range is valid
+    if (min_pos_mm < 0 || max_pos_mm < 0 || min_pos_mm > max_pos_mm ||
+        min_pos_mm < positionList.front().value || max_pos_mm > positionList.back().value) {
+        return;
+    }
+
+    // find the time ranges that correspond to the given board positions.
+    // forward to find the min time
     for (const auto& measurement : positionList) {
-        if (min_pos_mm >= measurement.value) {
+        if (measurement.value >= min_pos_mm) {
             min_pos_time_uS = measurement.time_uS;
             break;
         }
     }
     
-    // reverse
+    // reverse to find the max time
     auto rit = positionList.rbegin();
     while (rit != positionList.rend() && rit->value > max_pos_mm) {
         ++rit;
@@ -47,13 +57,8 @@ void BoardDensitySystem::CalculateDensityValues(int min_pos_mm, int max_pos_mm,
         if (density.time_uS > min_pos_time_uS && density.time_uS < max_pos_time_uS) {
             // valid, process it's density metrics
             
-            // -- minimum ---
-            if (first) {
-                min_density_val = density.value;
-                first = false;
-            }
-            if (density.value < min_density_val) {
-                min_density_val = density.value;
+            if (density.value < *min_density) {
+                *min_density = density.value;
             }
 
             sum_density += density.value;
@@ -65,15 +70,13 @@ void BoardDensitySystem::CalculateDensityValues(int min_pos_mm, int max_pos_mm,
         }
     }
 
+    // TODO: this is not thread safe. we are not using mutexes or anything to protect our data structures
     // we need to consider that MeasureDensityReady or MeasurePositionReady could fire while we are in here
     // gathering stastics, and thus clean removing old measurements and messing up our lists and/or iterators we are using on them
     // i.e. we aren't using a thread-safe data structure here
     // return measurements in pointers.
     
-    min_density = &min_density_val;
-    
-    auto mean_density_val = sum_density / count;
-    mean_density = &mean_density_val;
+    *mean_density = sum_density / count;
 
     auto median_count = count / 2;
     if (count % 2 == 1) {
@@ -90,8 +93,7 @@ void BoardDensitySystem::CalculateDensityValues(int min_pos_mm, int max_pos_mm,
             count++;
 
             if (median_count == count) {
-                auto d = density.value;
-                median_density = &d;
+                *median_density = density.value;
                 return;
             }
         }
@@ -115,14 +117,19 @@ void BoardDensitySystem::insertSorted(std::list<Measurement>& measureList, const
 }
 
 void BoardDensitySystem::clean(std::list<Measurement>& measureList) {
+
     // find the time value that was 5 seconds ago, in microseconds
     auto cutoffTime_uS = elapsed_uS() - 5'000'000;
+    int removed = 0;
 
     // and remove any off the front of the list; that's where the oldest measurements are
     while (!measureList.empty() && measureList.front().time_uS < cutoffTime_uS) {
         measureList.pop_front();
     }
 
+    //if (removed > 0) {
+    //    std::cout << "Cleaned " << removed << " measurements from the list." << std::endl;
+    //}
 }
 
 int BoardDensitySystem::elapsed_uS() {

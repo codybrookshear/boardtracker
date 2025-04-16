@@ -5,7 +5,7 @@
 #include <list>
 
 struct Measurement {
-    int value; // density or position_mm really
+    int value; // density (unit?) or position (mm)
     int time_uS;
 };
 
