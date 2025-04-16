@@ -1,6 +1,12 @@
 #include "BoardDensitySystem.h"
 #include <chrono>
 #include <iostream>
+#include <limits>
+#include <mutex>
+#include <deque>
+#include <vector>
+
+constexpr std::chrono::microseconds FIVE_SECONDS_US(5'000'000);
 
 BoardDensitySystem::BoardDensitySystem(const std::chrono::high_resolution_clock::time_point& startTime) 
     : startTime(startTime)
@@ -10,38 +16,52 @@ BoardDensitySystem::BoardDensitySystem(const std::chrono::high_resolution_clock:
 
 void BoardDensitySystem::MeasureDensityReady(int density, int time_uS) {
     std::lock_guard<std::mutex> lock(data_mutex);
-    insertSorted(densityList, {density, time_uS});
-    clean(densityList);
+    insertSorted(densities, {density, std::chrono::microseconds(time_uS)});
+    density_inserts_since_clean++;
+    if (density_inserts_since_clean >= 100) { // Clean every 100 inserts
+        clean(densities);
+        density_inserts_since_clean = 0;
+    }
 }
 
 void BoardDensitySystem::MeasurePositionReady(int position_mm, int time_uS) {
     std::lock_guard<std::mutex> lock(data_mutex);
-    insertSorted(positionList, {position_mm, time_uS});
-    clean(positionList);
+    insertSorted(positions, {position_mm, std::chrono::microseconds(time_uS)});
+    position_inserts_since_clean++;
+    if (position_inserts_since_clean >= 100) { // Clean every 100 inserts
+        clean(positions);
+        position_inserts_since_clean = 0;
+    }
 }
 
 void BoardDensitySystem::CalculateDensityValues(int min_pos_mm, int max_pos_mm,
         int *mean_density, int *min_density, int *median_density) {
     std::lock_guard<std::mutex> lock(data_mutex);
     
-    int min_pos_time_uS;
-    int max_pos_time_uS;
+    std::chrono::microseconds min_pos_time_uS;
+    std::chrono::microseconds max_pos_time_uS;
     int sum_density = 0;
     int count = 0;
+    std::vector<int> tmp_density_values;
 
     *mean_density = 0;
-    *min_density = INT_MAX;
+    *min_density = std::numeric_limits<int>::max();
     *median_density = 0;
+
+    if (positions.empty() || densities.empty()) {
+        // no measurements yet
+        return;
+    }
 
     // verify the requested board position range is valid
     if (min_pos_mm < 0 || max_pos_mm < 0 || min_pos_mm > max_pos_mm ||
-        min_pos_mm < positionList.front().value || max_pos_mm > positionList.back().value) {
+        min_pos_mm < positions.front().value || max_pos_mm > positions.back().value) {
         return;
     }
 
     // find the time ranges that correspond to the given board positions.
     // forward to find the min time
-    for (const auto& measurement : positionList) {
+    for (const auto& measurement : positions) {
         if (measurement.value >= min_pos_mm) {
             min_pos_time_uS = measurement.time_uS;
             break;
@@ -49,20 +69,24 @@ void BoardDensitySystem::CalculateDensityValues(int min_pos_mm, int max_pos_mm,
     }
     
     // reverse to find the max time
-    auto rit = positionList.rbegin();
-    while (rit != positionList.rend() && rit->value > max_pos_mm) {
+    auto rit = positions.rbegin();
+    while (rit != positions.rend() && rit->value > max_pos_mm) {
         ++rit;
     }
     max_pos_time_uS = rit->time_uS;
 
     // now loop through the densities and calc statistics for the requested time range
-    for (const auto& density : densityList) {
+    for (const auto& density : densities) {
         if (density.time_uS > min_pos_time_uS && density.time_uS < max_pos_time_uS) {
             // valid, process it's density metrics
             
             if (density.value < *min_density) {
                 *min_density = density.value;
             }
+
+            // add to the list of density values for median calc
+            tmp_density_values.push_back(density.value);
+
 
             sum_density += density.value;
             count++;
@@ -72,67 +96,56 @@ void BoardDensitySystem::CalculateDensityValues(int min_pos_mm, int max_pos_mm,
             break;
         }
     }
-    
-    *mean_density = sum_density / count;
 
-    auto median_count = count / 2;
-    if (count % 2 == 1) {
-        median_count++; // odd number of samples
+    if (count == 0) {
+        // should never happen, but just in case!
+        // no valid density measurements in the requested range
+        return;
     }
 
-    // TODO definition & calculation of median may need some work. today we do this:
-    // get the middle density value simply based on how many samples there are
-    // for the given distane measurements
-    count = 0;
-    for (const auto& density : densityList) {
-        if (density.time_uS > min_pos_time_uS && density.time_uS < max_pos_time_uS) {
-            // valid, process it's density metrics
-            count++;
+    // calculate the mean density
+    *mean_density = sum_density / count;
 
-            if (median_count == count) {
-                *median_density = density.value;
-                return;
-            }
-        }
+    // sort the density values
+    std::sort(tmp_density_values.begin(), tmp_density_values.end());
+    // find the median density
+    if (count % 2 == 0) {
+        // even number of elements
+        *median_density = (tmp_density_values[count / 2 - 1] + tmp_density_values[count / 2]) / 2;
+    } else {
+        // odd number of elements
+        *median_density = tmp_density_values[count / 2];
     }
 
 }
 
-void BoardDensitySystem::insertSorted(std::list<Measurement>& measureList, const Measurement& newMeasurement) {
+void BoardDensitySystem::insertSorted(std::deque<Measurement>& measurements, const Measurement& newMeasurement) {
         // 99% case - time comes after all others
-        if (measureList.empty() || measureList.back().time_uS <= newMeasurement.time_uS) {
-            measureList.push_back(newMeasurement);
+        if (measurements.empty() || newMeasurement.time_uS >= measurements.back().time_uS) {
+            measurements.push_back(newMeasurement);
             return;
         }
     
         // 1% case - measurement time comes out of order
-        auto rit = measureList.rbegin();
-        while (rit != measureList.rend() && rit->time_uS > newMeasurement.time_uS) {
+        auto rit = measurements.rbegin();
+        while (rit != measurements.rend() && rit->time_uS > newMeasurement.time_uS) {
             ++rit;
         }
-        measureList.insert(rit.base(), newMeasurement);
+        measurements.insert(rit.base(), newMeasurement);
 }
 
-void BoardDensitySystem::clean(std::list<Measurement>& measureList) {
+void BoardDensitySystem::clean(std::deque<Measurement>& measurements) {
 
     // find the time value that was 5 seconds ago, in microseconds
-    auto cutoffTime_uS = elapsed_uS() - 5'000'000;
-    int removed = 0;
+    const std::chrono::microseconds cutoffTime_uS = elapsed_uS() - FIVE_SECONDS_US;
 
     // and remove any off the front of the list; that's where the oldest measurements are
-    while (!measureList.empty() && measureList.front().time_uS < cutoffTime_uS) {
-        measureList.pop_front();
+    while (!measurements.empty() && measurements.front().time_uS < cutoffTime_uS) {
+        measurements.pop_front();
     }
-
-    //if (removed > 0) {
-    //    std::cout << "Cleaned " << removed << " measurements from the list." << std::endl;
-    //}
 }
 
-int BoardDensitySystem::elapsed_uS() {
-    // Calculate how many microseconds have elapsed since startTime
+std::chrono::microseconds BoardDensitySystem::elapsed_uS() const {
     auto now = std::chrono::high_resolution_clock::now();
-    int elapsed_uS = std::chrono::duration_cast<std::chrono::microseconds>(now - startTime).count();
-
-    return elapsed_uS;
+    return std::chrono::duration_cast<std::chrono::microseconds>(now - startTime);
 }
