@@ -32,7 +32,7 @@ std::string formatWithCommas(int64_t value) {
 
 int main() {
     const std::chrono::high_resolution_clock::time_point& startTime = std::chrono::high_resolution_clock::now();
-    BoardDensitySystem bds = BoardDensitySystem(startTime);
+    BoardDensitySystem bds(startTime);
 
     // Simulate board movement (position increases over time)
     int currentPosition = 0;

@@ -9,17 +9,20 @@ BoardDensitySystem::BoardDensitySystem(const std::chrono::high_resolution_clock:
 }
 
 void BoardDensitySystem::MeasureDensityReady(int density, int time_uS) {
+    std::lock_guard<std::mutex> lock(data_mutex);
     insertSorted(densityList, {density, time_uS});
     clean(densityList);
 }
 
 void BoardDensitySystem::MeasurePositionReady(int position_mm, int time_uS) {
+    std::lock_guard<std::mutex> lock(data_mutex);
     insertSorted(positionList, {position_mm, time_uS});
     clean(positionList);
 }
 
 void BoardDensitySystem::CalculateDensityValues(int min_pos_mm, int max_pos_mm,
         int *mean_density, int *min_density, int *median_density) {
+    std::lock_guard<std::mutex> lock(data_mutex);
     
     int min_pos_time_uS;
     int max_pos_time_uS;
@@ -69,12 +72,6 @@ void BoardDensitySystem::CalculateDensityValues(int min_pos_mm, int max_pos_mm,
             break;
         }
     }
-
-    // TODO: this is not thread safe. we are not using mutexes or anything to protect our data structures
-    // we need to consider that MeasureDensityReady or MeasurePositionReady could fire while we are in here
-    // gathering stastics, and thus clean removing old measurements and messing up our lists and/or iterators we are using on them
-    // i.e. we aren't using a thread-safe data structure here
-    // return measurements in pointers.
     
     *mean_density = sum_density / count;
 
@@ -83,7 +80,7 @@ void BoardDensitySystem::CalculateDensityValues(int min_pos_mm, int max_pos_mm,
         median_count++; // odd number of samples
     }
 
-    // TODO definition of median needs some work. today we do this:
+    // TODO definition & calculation of median may need some work. today we do this:
     // get the middle density value simply based on how many samples there are
     // for the given distane measurements
     count = 0;

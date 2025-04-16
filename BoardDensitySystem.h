@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <list>
+#include <mutex>
 
 struct Measurement {
     int value; // density (unit?) or position (mm)
@@ -42,11 +43,7 @@ private:
     const std::chrono::high_resolution_clock::time_point& startTime;
     std::list<Measurement> densityList;
     std::list<Measurement> positionList;
+    std::mutex data_mutex;
 };
-
-
-
-
-
 
 #endif // BOARDDENSITYSYSTEM_H
